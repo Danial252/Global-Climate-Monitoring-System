@@ -1,4 +1,5 @@
 #include <Wire.h>
+#include <AS5600.h>
 #include <Adafruit_Sensor.h>
 #include <Adafruit_BMP280.h>
 #include <Adafruit_GFX.h>
@@ -9,6 +10,8 @@
 #include <PubSubClient.h>
 #include <WiFiClient.h>
 #include <ArduinoJson.h>
+#include <Adafruit_NeoPixel.h>
+#include <TimeLib.h>
 
 // Define OLED display size
 #define SCREEN_WIDTH 128
@@ -17,6 +20,11 @@
 // Define DHT sensor type and pin
 #define DHTTYPE DHT21   // AM2301
 #define DHTPIN 15
+
+
+// Define WS2812 LED strip pin and number of LEDs
+#define LED_PIN 13
+#define NUM_LEDS 1
 
 DHT dht(DHTPIN, DHTTYPE);
 Adafruit_BMP280 bmp;
@@ -38,6 +46,13 @@ WiFiServer server(80);
 
 unsigned long lastMsg = 0;
 float temperatureDHT, humidity, pressure, altitude, coPPM, nh3PPM, no2PPM;
+String weatherCondition;
+
+String weekPredictions[7];
+String weekDays[7] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+
+// AS5600 sensor instance
+//AS5600 as5600;
 
 // Function to connect to WiFi
 void setup_wifi() {
@@ -129,6 +144,52 @@ void calculateAQI() {
   Serial.print("Overall AQI: "); Serial.println(AQI);
   Serial.print("Air Quality: "); Serial.println(airQualityCategory);
 }
+// Function to set LED color based on temperature
+//void setLedColor(float temperature) {
+  //if (temperature < 10) {
+    //strip.setPixelColor(0, strip.Color(0, 0, 255)); // Blue for cold
+  //} else if (temperature < 25) {
+    //strip.setPixelColor(0, strip.Color(0, 255, 0)); // Green for moderate
+  //} else {
+    //strip.setPixelColor(0, strip.Color(255, 0, 0)); // Red for hot
+  //}
+  //strip.show();
+//}
+
+// Function to predict weather based on sensor data
+void predictWeather() {
+  if (humidity > 80 && temperatureDHT < 20) {
+    weatherCondition = "Rainy";
+  } else if (humidity < 50 && temperatureDHT > 25) {
+    weatherCondition = "Sunny";
+  } else {
+    weatherCondition = "Cloudy";
+  }
+}
+
+// Function to generate weekly weather predictions
+void generateWeekPredictions() {
+  float baseTemp = temperatureDHT;
+  float baseHum = humidity;
+  float basePressure = pressure;
+
+  for (int i = 0; i < 7; i++) {
+    float tempTrend = (i + 1) * 0.5; // Example trend: temp increases 0.5C per day
+    float humTrend = (i + 1) * 1;    // Example trend: humidity increases 1% per day
+    float pressureTrend = (i + 1) * 0.2; // Example trend: pressure increases 0.2hPa per day
+
+    String dayWeather;
+    if (baseHum + humTrend > 80 && baseTemp + tempTrend < 20) {
+      dayWeather = "Rainy";
+    } else if (baseHum + humTrend < 50 && baseTemp + tempTrend > 25) {
+      dayWeather = "Sunny";
+    } else {
+      dayWeather = "Cloudy";
+    }
+
+    weekPredictions[i] = weekDays[(weekday() + i) % 7] + ": Temp " + String(baseTemp + tempTrend) + "C, Hum " + String(baseHum + humTrend) + "%, Pressure " + String(basePressure + pressureTrend) + "hPa (" + dayWeather + ")";
+  }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -151,6 +212,19 @@ void setup() {
   display.display();
   delay(2000);
   display.clearDisplay();
+// Initialize AS5600 sensor
+  //Wire.begin(21, 22);  // SDA, SCL pins
+  //if (!as5600.begin()) {
+    //Serial.println("AS5600 sensor not found!");
+    //while (1);
+  //}
+  //Serial.println("AS5600 sensor initialized");
+
+  // Initialize WS2812 LED strip
+  //strip.begin();
+  //strip.show(); // Initialize all pixels to 'off'
+
+
 
   // Initialize WiFi and MQTT
   setup_wifi();
@@ -200,6 +274,14 @@ void loop() {
 
   float AQI;
   String airQualityCategory = String(35);
+  //windDirection = as5600.getAngle();
+
+  // Set LED color based on temperature
+  //setLedColor(temperatureDHT);
+
+  // Predict weather and generate weekly predictions
+  predictWeather();
+  generateWeekPredictions();
 
   // Publish sensor values to MQTT broker
   if (millis() - lastMsg > 2000) { // Publish data every 2 seconds
@@ -232,13 +314,21 @@ void loop() {
     Serial.print("NO2: ");
     Serial.println(no2PPM);
     client.publish("/UCP/EE/GCMS/no2", String(no2PPM).c_str());
-Serial.print("AQI: ");
+    Serial.print("AQI: ");
     Serial.println(AQI);
     client.publish("/UCP/EE/GCMS/aqi", String(AQI).c_str());
 
     Serial.print("Air Quality: ");
     Serial.println(airQualityCategory);
     client.publish("/UCP/EE/GCMS/airQuality", airQualityCategory.c_str());
+    Serial.print("Wind Direction: ");
+    //Serial.println(windDirection);
+    //client.publish("/UCP/EE/GCMS/windDirection", String(windDirection).c_str());
+
+    // Publish weekly weather predictions to MQTT
+    for (int i = 0; i < 7; i++) {
+      client.publish("/UCP/EE/GCMS/weeklyPrediction", weekPredictions[i].c_str());
+    }
   }
 
   // Display values on OLED
@@ -280,7 +370,7 @@ Serial.print("AQI: ");
   display.print("NO2: ");
   display.print(no2PPM);
   display.println(" ppm");
-display.setCursor(64, 10);
+  display.setCursor(64, 10);
   display.print("AQI: ");
   display.print(AQI);
 
@@ -293,177 +383,209 @@ display.setCursor(64, 10);
   display.display();
 
 // Handle web server client
-  WiFiClient client = server.available();  // Listen for incoming clients
+WiFiClient client = server.available();  // Listen for incoming clients
 
-  if (client) {
-    String request = client.readStringUntil('\r');
-    Serial.print("Request: ");
-    Serial.println(request);
-    client.flush();
+if (client) {
+  String request = client.readStringUntil('\r');
+  Serial.print("Request: ");
+  Serial.println(request);
+  client.flush();
 
-    if (request.indexOf("/data") != -1) {
-      // Handle JSON data request
-      String jsonResponse = "{";
-      jsonResponse += "\"temperature\":" + String(temperatureDHT) + ",";
-      jsonResponse += "\"humidity\":" + String(humidity) + ",";
-      jsonResponse += "\"pressure\":" + String(pressure) + ",";
-      jsonResponse += "\"altitude\":" + String(altitude) + ",";
-      jsonResponse += "\"co\":" + String(coPPM) + ",";
-      jsonResponse += "\"nh3\":" + String(nh3PPM) + ",";
-      jsonResponse += "\"no2\":" + String(no2PPM) + ",";
-      jsonResponse += "\"aqi\":" + String(AQI) + ",";
-      jsonResponse += "\"airQualityCategory\":\"" + airQualityCategory + "\"";
-      jsonResponse += "}";
+  if (request.indexOf("/data") != -1) {
+    // Handle JSON data request
+    String jsonResponse = "{";
+    jsonResponse += "\"temperature\":" + String(temperatureDHT) + ",";
+    jsonResponse += "\"humidity\":" + String(humidity) + ",";
+    jsonResponse += "\"pressure\":" + String(pressure) + ",";
+    jsonResponse += "\"altitude\":" + String(altitude) + ",";
+    jsonResponse += "\"co\":" + String(coPPM) + ",";
+    jsonResponse += "\"nh3\":" + String(nh3PPM) + ",";
+    jsonResponse += "\"no2\":" + String(no2PPM) + ",";
+    jsonResponse += "\"aqi\":" + String(AQI) + ",";
+    jsonResponse += "\"airQualityCategory\":\"" + airQualityCategory + "\",";
+    jsonResponse += "\"windDirection\":\"" + windDirection + "\",";
+    jsonResponse += "\"weatherPrediction\":\"" + weatherPrediction + "\",";
+    jsonResponse += "\"weeklyForecast\":" + weeklyForecast; // Assuming weeklyForecast is a JSON string
+    jsonResponse += "}";
 
-      client.println("HTTP/1.1 200 OK");
-      client.println("Content-type: application/json");
-      client.println("Connection: keep-alive");
-      client.println();
-      client.println(jsonResponse);
-    } else {
-      // Handle main page request
-      client.println("HTTP/1.1 200 OK");
-      client.println("Content-type:text/html");
-      client.println("Connection: keep-alive");
-      client.println();
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-type: application/json");
+    client.println("Connection: keep-alive");
+    client.println();
+    client.println(jsonResponse);
+  } else {
+    // Handle main page request
+    client.println("HTTP/1.1 200 OK");
+    client.println("Content-type:text/html");
+    client.println("Connection: keep-alive");
+    client.println();
 
-      // Display the HTML web page
-      client.println("<!DOCTYPE html><html>");
-      client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-      client.println("<link rel=\"icon\" href=\"data:,\">");
-      client.println("<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>");
-      client.println("<style>");
-      client.println("body { font-family: Arial, sans-serif; background: linear-gradient(to right, #87CEEB, #f0f8ff); color: #333; margin: 0; padding: 0; }");
-      client.println(".header { background: skyblue; font-size: 30px; color: white; padding: 20px; text-align: center; }");
-      client.println(".header img { height: 40px; vertical-align: middle; }");
-      client.println(".container { padding: 20px; display: flex; flex-wrap: wrap; justify-content: center; }");
-      client.println(".card { background: white; padding: 20px; margin: 10px; border-radius: 12px; box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1); width: 350px; }");
-      client.println(".title { font-size: 24px; font-weight: bold; margin-bottom: 20px; color: #0056b3; text-align: center; }");
-      client.println(".reading { font-size: 18px; margin: 10px 0; text-align: center; }");
-      client.println(".label { font-size: 16px; font-weight: bold; background: #87CEEB; color: white; padding: 5px; border-radius: 5px; margin-bottom: 10px; display: inline-block; }");
-      client.println("canvas { display: block; margin: 0 auto; max-width: 100%; }");
-      client.println("</style></head>");
-      client.println("<body>");
-      client.println("<div class='header'>");
-      client.println("<div class='header'>UCP Global Climate Monitoring Station</div>");
-      client.println("</div>");
-      client.println("<div class='container'>");
+    // Display the HTML web page
+    client.println("<!DOCTYPE html><html>");
+    client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
+    client.println("<link rel=\"icon\" href=\"data:,\">");
+    client.println("<script src='https://cdn.jsdelivr.net/npm/chart.js'></script>");
+    client.println("<style>");
+    client.println("body { font-family: Arial, sans-serif; background: linear-gradient(to right, #87CEEB, #f0f8ff); color: #333; margin: 0; padding: 0; }");
+    client.println(".header { background: skyblue; font-size: 30px; color: white; padding: 20px; text-align: center; }");
+    client.println(".header img { height: 40px; vertical-align: middle; }");
+    client.println(".container { padding: 20px; display: flex; flex-wrap: wrap; justify-content: center; }");
+    client.println(".card { background: white; padding: 20px; margin: 10px; border-radius: 12px; box-shadow: 0 6px 12px rgba(0, 0, 0, 0.1); width: 350px; }");
+    client.println(".title { font-size: 24px; font-weight: bold; margin-bottom: 20px; color: #0056b3; text-align: center; }");
+    client.println(".reading { font-size: 18px; margin: 10px 0; text-align: center; }");
+    client.println(".label { font-size: 16px; font-weight: bold; background: #87CEEB; color: white; padding: 5px; border-radius: 5px; margin-bottom: 10px; display: inline-block; }");
+    client.println("canvas { display: block; margin: 0 auto; max-width: 100%; }");
+    client.println("</style></head>");
+    client.println("<body>");
+    client.println("<div class='header'>");
+    client.println("<div class='header'>UCP Global Climate Monitoring Station</div>");
+    client.println("</div>");
+    client.println("<div class='container'>");
 
-      client.println("<div class='card'><div class='title'>Temperature</div>");
-      client.println("<div class='reading'><span class='label'>DHT Sensor</span> <span id='temperature'>-</span>&degC</div>");
-      client.println("<canvas id='tempChart'></canvas></div>");
+    client.println("<div class='card'><div class='title'>Temperature</div>");
+    client.println("<div class='reading'><span class='label'>DHT Sensor</span> <span id='temperature'>-</span>&degC</div>");
+    client.println("<canvas id='tempChart'></canvas></div>");
 
-      client.println("<div class='card'><div class='title'>Humidity</div>");
-      client.println("<div class='reading'><span class='label'>DHT Sensor</span> <span id='humidity'>-</span> %RH</div>");
-      client.println("<canvas id='humChart'></canvas></div>");
+    client.println("<div class='card'><div class='title'>Humidity</div>");
+    client.println("<div class='reading'><span class='label'>DHT Sensor</span> <span id='humidity'>-</span> %RH</div>");
+    client.println("<canvas id='humChart'></canvas></div>");
 
-      client.println("<div class='card'><div class='title'>Pressure</div>");
-      client.println("<div class='reading'><span class='label'>BMP280 Sensor</span> <span id='pressure'>-</span> hPa</div>");
-      client.println("<canvas id='pressureChart'></canvas></div>");
+    client.println("<div class='card'><div class='title'>Pressure</div>");
+    client.println("<div class='reading'><span class='label'>BMP280 Sensor</span> <span id='pressure'>-</span> hPa</div>");
+    client.println("<canvas id='pressureChart'></canvas></div>");
 
-      client.println("<div class='card'><div class='title'>Altitude</div>");
-      client.println("<div class='reading'><span class='label'>BMP280 Sensor</span> <span id='altitude'>-</span> m</div>");
-      client.println("<canvas id='altitudeChart'></canvas></div>");
+    client.println("<div class='card'><div class='title'>Altitude</div>");
+    client.println("<div class='reading'><span class='label'>BMP280 Sensor</span> <span id='altitude'>-</span> m</div>");
+    client.println("<canvas id='altitudeChart'></canvas></div>");
 
-      client.println("<div class='card'><div class='title'>CO Concentration</div>");
-      client.println("<div class='reading'><span class='label'>MICS6814 Sensor</span> <span id='coPPM'>-</span> ppm</div>");
-      client.println("<canvas id='coChart'></canvas></div>");
+    client.println("<div class='card'><div class='title'>CO Concentration</div>");
+    client.println("<div class='reading'><span class='label'>MICS6814 Sensor</span> <span id='coPPM'>-</span> ppm</div>");
+    client.println("<canvas id='coChart'></canvas></div>");
 
-      client.println("<div class='card'><div class='title'>NH3 Concentration</div>");
-      client.println("<div class='reading'><span class='label'>MICS6814 Sensor</span> <span id='nh3PPM'>-</span> ppm</div>");
-      client.println("<canvas id='nh3Chart'></canvas></div>");
+    client.println("<div class='card'><div class='title'>NH3 Concentration</div>");
+    client.println("<div class='reading'><span class='label'>MICS6814 Sensor</span> <span id='nh3PPM'>-</span> ppm</div>");
+    client.println("<canvas id='nh3Chart'></canvas></div>");
 
-      client.println("<div class='card'><div class='title'>NO2 Concentration</div>");
-      client.println("<div class='reading'><span class='label'>MICS6814 Sensor</span> <span id='no2PPM'>-</span> ppm</div>");
-      client.println("<canvas id='no2Chart'></canvas></div>");
+    client.println("<div class='card'><div class='title'>NO2 Concentration</div>");
+    client.println("<div class='reading'><span class='label'>MICS6814 Sensor</span> <span id='no2PPM'>-</span> ppm</div>");
+    client.println("<canvas id='no2Chart'></canvas></div>");
 
-      // AQI Card
-      client.println("<div class='card'><div class='title'>Air Quality Index (AQI)</div>");
-      client.println("<div class='reading'><span class='label'>Calculated</span> <span id='aqi'>-</span></div>");
-      client.println("<div class='reading'><span class='label'>Category</span> <span id='airQualityCategory'>-</span></div>");
-      
-      client.println("</div>");
+    // AQI Card
+    client.println("<div class='card'><div class='title'>Air Quality Index (AQI)</div>");
+    client.println("<div class='reading'><span class='label'>Calculated</span> <span id='aqi'>-</span></div>");
+    client.println("<div class='reading'><span class='label'>Category</span> <span id='airQualityCategory'>-</span></div>");
+    client.println("<div class='reading' id='airQualityDescription'>-</div>");
+    client.println("</div>");
 
-      client.println("</div>"); // Close container div
+    // Wind Direction Card
+    client.println("<div class='card'><div class='title'>Wind Direction</div>");
+    client.println("<div class='reading'><span id='windDirectionDial'>-</span></div>");
+    client.println("</div>");
 
-      // Add JavaScript to fetch the latest sensor data periodically and update the charts
-      client.println("<script>");
-      client.println("function updateData() {");
-      client.println("  fetch('/data').then(response => response.json()).then(data => {");
-      client.println("    document.getElementById('temperature').innerText = data.temperature;");
-      client.println("    document.getElementById('humidity').innerText = data.humidity;");
-      client.println("    document.getElementById('pressure').innerText = data.pressure;");
-      client.println("    document.getElementById('altitude').innerText = data.altitude;");
-      client.println("    document.getElementById('coPPM').innerText = data.co;");
-      client.println("    document.getElementById('nh3PPM').innerText = data.nh3;");
-      client.println("    document.getElementById('no2PPM').innerText = data.no2;");
-      client.println("    document.getElementById('aqi').innerText = data.aqi;");
-      client.println("    document.getElementById('airQualityCategory').innerText = data.airQualityCategory;");
+    // Weather Prediction Card
+    client.println("<div class='card'><div class='title'>7-Day Weather Prediction</div>");
+    client.println("<div class='reading' id='weeklyForecast'>-</div>");
+    client.println("</div>");
 
-client.println("    const now = new Date();");
-client.println("    const timeLabel = now.getHours() + ':' + now.getMinutes() + ':' + now.getSeconds();");
-client.println("    tempChart.data.labels.push(timeLabel);");
-client.println("    humChart.data.labels.push(timeLabel);");
-client.println("    pressureChart.data.labels.push(timeLabel);");
-client.println("    altitudeChart.data.labels.push(timeLabel);");
-client.println("    coChart.data.labels.push(timeLabel);");
-client.println("    nh3Chart.data.labels.push(timeLabel);");
-client.println("    no2Chart.data.labels.push(timeLabel);");
+    client.println("</div>"); // Close container div
 
-      // Update charts
-      client.println("    tempChart.data.datasets[0].data.push(data.temperature);");
-      client.println("    humChart.data.datasets[0].data.push(data.humidity);");
-      client.println("    pressureChart.data.datasets[0].data.push(data.pressure);");
-      client.println("    altitudeChart.data.datasets[0].data.push(data.altitude);");
-      client.println("    coChart.data.datasets[0].data.push(data.co);");
-      client.println("    nh3Chart.data.datasets[0].data.push(data.nh3);");
-      client.println("    no2Chart.data.datasets[0].data.push(data.no2);");
+    // Add JavaScript to fetch the latest sensor data periodically and update the charts
+    client.println("<script>");
+    client.println("function updateData() {");
+    client.println("  fetch('/data').then(response => response.json()).then(data => {");
+    client.println("    document.getElementById('temperature').innerText = data.temperature;");
+    client.println("    document.getElementById('humidity').innerText = data.humidity;");
+    client.println("    document.getElementById('pressure').innerText = data.pressure;");
+    client.println("    document.getElementById('altitude').innerText = data.altitude;");
+    client.println("    document.getElementById('coPPM').innerText = data.co;");
+    client.println("    document.getElementById('nh3PPM').innerText = data.nh3;");
+    client.println("    document.getElementById('no2PPM').innerText = data.no2;");
+    client.println("    document.getElementById('aqi').innerText = data.aqi;");
+    client.println("    document.getElementById('airQualityCategory').innerText = data.airQualityCategory;");
 
-      // Remove old data points if more than 20
-      client.println("    if(tempChart.data.datasets[0].data.length > 20) { tempChart.data.datasets[0].data.shift(); }");
-      client.println("    if(humChart.data.datasets[0].data.length > 20) { humChart.data.datasets[0].data.shift(); }");
-      client.println("    if(pressureChart.data.datasets[0].data.length > 20) { pressureChart.data.datasets[0].data.shift(); }");
-      client.println("    if(altitudeChart.data.datasets[0].data.length > 20) { altitudeChart.data.datasets[0].data.shift(); }");
-      client.println("    if(coChart.data.datasets[0].data.length > 20) { coChart.data.datasets[0].data.shift(); }");
-      client.println("    if(nh3Chart.data.datasets[0].data.length > 20) { nh3Chart.data.datasets[0].data.shift(); }");
-      client.println("    if(no2Chart.data.datasets[0].data.length > 20) { no2Chart.data.datasets[0].data.shift(); }");
+    // Add air quality description
+    client.println("    let airQualityDescription = '';");
+    client.println("    switch(data.airQualityCategory) {");
+    client.println("      case 'Good': airQualityDescription = 'Air quality is considered satisfactory, and air pollution poses little or no risk.'; break;");
+    client.println("      case 'Moderate': air quality is acceptable; however, for some pollutants there may be a moderate health concern for a very small number of people who are unusually sensitive to air pollution.'; break;");
+    client.println("      case 'Unhealthy for Sensitive Groups': air quality is unhealthy for sensitive groups; everyone may begin to experience health effects.'; break;");
+    client.println("      case 'Unhealthy': air quality is unhealthy; everyone may begin to experience more serious health effects.'; break;");
+    client.println("      case 'Very Unhealthy': air quality is very unhealthy; health alert: everyone may experience serious health effects.'; break;");
+    client.println("      case 'Hazardous': air quality is hazardous; health warnings of emergency conditions: everyone is more likely to be affected.'; break;");
+    client.println("    }");
+    client.println("    document.getElementById('airQualityDescription').innerText = airQualityDescription;");
 
-      client.println("    tempChart.update();");
-      client.println("    humChart.update();");
-      client.println("    pressureChart.update();");
-      client.println("    altitudeChart.update();");
-      client.println("    coChart.update();");
-      client.println("    nh3Chart.update();");
-      client.println("    no2Chart.update();");
-      client.println("  });");
-      client.println("}");
-      client.println("setInterval(updateData, 1000);");
+    // Update wind direction
+    client.println("    document.getElementById('windDirectionDial').innerHTML = `<img src='https://example.com/wind-dial.png' style='transform:rotate(${data.windDirection}deg);' />`;");
 
-      // Chart.js setup
-      client.println("const ctxTemp = document.getElementById('tempChart').getContext('2d');");
-      client.println("const ctxHum = document.getElementById('humChart').getContext('2d');");
-      client.println("const ctxPressure = document.getElementById('pressureChart').getContext('2d');");
-      client.println("const ctxAltitude = document.getElementById('altitudeChart').getContext('2d');");
-      client.println("const ctxCO = document.getElementById('coChart').getContext('2d');");
-      client.println("const ctxNH3 = document.getElementById('nh3Chart').getContext('2d');");
-      client.println("const ctxNO2 = document.getElementById('no2Chart').getContext('2d');");
+    // Update weekly forecast
+    client.println("    let forecastHtml = '';");
+    client.println("    data.weeklyForecast.forEach(day => {");
+    client.println("      forecastHtml += `<div>${day.day}: ${day.temp}°C, ${day.humidity}%, ${day.condition}</div>`;");
+    client.println("    });");
+    client.println("    document.getElementById('weeklyForecast').innerHTML = forecastHtml;");
 
-      // Create the charts
-      client.println("const tempChart = new Chart(ctxTemp, { type: 'line', data: { labels: [], datasets: [{ label: 'Temperature (C)', data: [], borderColor: 'red', fill: false }] } });");
-      client.println("const humChart = new Chart(ctxHum, { type: 'line', data: { labels: [], datasets: [{ label: 'Humidity (%RH)', data: [], borderColor: 'blue', fill: false }] } });");
-      client.println("const pressureChart = new Chart(ctxPressure, { type: 'line', data: { labels: [], datasets: [{ label: 'Pressure (hPa)', data: [], borderColor: 'green', fill: false }] } });");
-      client.println("const altitudeChart = new Chart(ctxAltitude, { type: 'line', data: { labels: [], datasets: [{ label: 'Altitude (m)', data: [], borderColor: 'purple', fill: false }] } });");
-      client.println("const coChart = new Chart(ctxCO, { type: 'line', data: { labels: [], datasets: [{ label: 'CO (ppm)', data: [], borderColor: 'orange', fill: false }] } });");
-      client.println("const nh3Chart = new Chart(ctxNH3, { type: 'line', data: { labels: [], datasets: [{ label: 'NH3 (ppm)', data: [], borderColor: 'pink', fill: false }] } });");
-      client.println("const no2Chart = new Chart(ctxNO2, { type: 'line', data: { labels: [], datasets: [{ label: 'NO2 (ppm)', data: [], borderColor: 'brown', fill: false }] } });");
+    // Charts update logic (same as before)
+    const now = new Date();
+    const timeLabel = now.getHours() + ':' + now.getMinutes() + ':' + now.getSeconds();
+    tempChart.data.labels.push(timeLabel);
+    humChart.data.labels.push(timeLabel);
+    pressureChart.data.labels.push(timeLabel);
+    altitudeChart.data.labels.push(timeLabel);
+    coChart.data.labels.push(timeLabel);
+    nh3Chart.data.labels.push(timeLabel);
+    no2Chart.data.labels.push(timeLabel);
 
-      client.println("</script>");
-      client.println("</body></html>");
-      client.println();
-    }
+    tempChart.data.datasets[0].data.push(data.temperature);
+    humChart.data.datasets[0].data.push(data.humidity);
+    pressureChart.data.datasets[0].data.push(data.pressure);
+    altitudeChart.data.datasets[0].data.push(data.altitude);
+    coChart.data.datasets[0].data.push(data.co);
+    nh3Chart.data.datasets[0].data.push(data.nh3);
+    no2Chart.data.datasets[0].data.push(data.no2);
 
-    delay(1);
-    client.stop();
-    Serial.println("Client disconnected.");
-  }
+    if(tempChart.data.datasets[0].data.length > 20) { tempChart.data.datasets[0].data.shift(); }
+    if(humChart.data.datasets[0].data.length > 20) { humChart.data.datasets[0].data.shift(); }
+    if(pressureChart.data.datasets[0].data.length > 20) { pressureChart.data.datasets[0].data.shift(); }
+    if(altitudeChart.data.datasets[0].data.length > 20) { altitudeChart.data.datasets[0].data.shift(); }
+    if(coChart.data.datasets[0].data.length > 20) { coChart.data.datasets[0].data.shift(); }
+    if(nh3Chart.data.datasets[0].data.length > 20) { nh3Chart.data.datasets[0].data.shift(); }
+    if(no2Chart.data.datasets[0].data.length > 20) { no2Chart.data.datasets[0].data.shift(); }
+
+    tempChart.update();
+    humChart.update();
+    pressureChart.update();
+    altitudeChart.update();
+    coChart.update();
+    nh3Chart.update();
+    no2Chart.update();
+  });
+}
+setInterval(updateData, 1000);
+
+// Chart.js setup
+const ctxTemp = document.getElementById('tempChart').getContext('2d');
+const ctxHum = document.getElementById('humChart').getContext('2d');
+const ctxPressure = document.getElementById('pressureChart').getContext('2d');
+const ctxAltitude = document.getElementById('altitudeChart').getContext('2d');
+const ctxCO = document.getElementById('coChart').getContext('2d');
+const ctxNH3 = document.getElementById('nh3Chart').getContext('2d');
+const ctxNO2 = document.getElementById('no2Chart').getContext('2d');
+
+const tempChart = new Chart(ctxTemp, { type: 'line', data: { labels: [], datasets: [{ label: 'Temperature (C)', data: [], borderColor: 'red', fill: false }] } });
+const humChart = new Chart(ctxHum, { type: 'line', data: { labels: [], datasets: [{ label: 'Humidity (%RH)', data: [], borderColor: 'blue', fill: false }] } });
+const pressureChart = new Chart(ctxPressure, { type: 'line', data: { labels: [], datasets: [{ label: 'Pressure (hPa)', data: [], borderColor: 'green', fill: false }] } });
+const altitudeChart = new Chart(ctxAltitude, { type: 'line', data: { labels: [], datasets: [{ label: 'Altitude (m)', data: [], borderColor: 'purple', fill: false }] } });
+const coChart = new Chart(ctxCO, { type: 'line', data: { labels: [], datasets: [{ label: 'CO (ppm)', data: [], borderColor: 'orange', fill: false }] } });
+const nh3Chart = new Chart(ctxNH3, { type: 'line', data: { labels: [], datasets: [{ label: 'NH3 (ppm)', data: [], borderColor: 'pink', fill: false }] } });
+const no2Chart = new Chart(ctxNO2, { type: 'line', data: { labels: [], datasets: [{ label: 'NO2 (ppm)', data: [], borderColor: 'brown', fill: false }] } });
+</script>");
+client.println("</body></html>");
+client.println();
+}
+
+delay(1);
+client.stop();
+Serial.println("Client disconnected.");
+}
 }
